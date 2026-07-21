@@ -16,10 +16,12 @@ many times this script runs.
 Bulk/automated mail (marketing, notifications, automated receipts) is
 excluded via a heuristic (see _is_bulk_mail) rather than Gmail's
 CATEGORY_* labels, since those are inconsistently applied — some accounts
-never assign them even to obvious marketing mail. Mail is also only ever
-in scope if received on/after SWEEP_SINCE_DATE below, persisted to
-.swept_since so the cutoff stays fixed permanently, regardless of
-when/where this script is run.
+never assign them even to obvious marketing mail. For accounts not listed
+in GMAIL_UNLIMITED_ACCOUNTS, mail is only in scope if received after the
+previous successful sweep of that account -- a rolling per-account cutoff
+persisted in .swept_since, so each run only asks Gmail for what's new
+since last time instead of re-fetching the same window repeatedly. The
+very first sweep of an account falls back to SWEEP_SINCE_DATE below.
 
 A local cache file (processed_ids.json) tracks which message IDs have
 already been summarized, so re-running the script only processes messages
@@ -161,20 +163,26 @@ def save_cache(path: Path, message_ids: set) -> None:
         json.dump(sorted(message_ids), f, indent=2)
 
 
-def get_since_timestamp() -> int:
+def load_since_map() -> dict:
     """
-    Return the Unix timestamp after which mail is in scope. Fixed to
-    SWEEP_SINCE_DATE and persisted, so the cutoff never drifts even if this
-    file is recreated later or the script runs on a different machine.
+    Return {account_label: unix_timestamp}, the end of each account's last
+    successful sweep. A label missing from the map hasn't been swept
+    before, so it falls back to SWEEP_SINCE_DATE.
     """
-    if SINCE_PATH.exists():
-        try:
-            return int(SINCE_PATH.read_text().strip())
-        except (ValueError, OSError):
-            pass
-    since_ts = int(SWEEP_SINCE_DATE.timestamp())
-    SINCE_PATH.write_text(str(since_ts), encoding="utf-8")
-    return since_ts
+    if not SINCE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SINCE_PATH.read_text())
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def save_since_map(since_map: dict) -> None:
+    """Persist the per-account sweep cutoffs."""
+    SINCE_PATH.write_text(json.dumps(since_map, indent=2), encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -480,9 +488,28 @@ def summarize_email(email_dict: dict, base_url: str, model: str) -> str:
 # Output
 # --------------------------------------------------------------------------
 
+YOUVE_GOT_MAIL_BANNER = r"""
+                              _______________
+                             |\             /|
+                             | \           / |
+                             |  \         /  |
+                             |   \       /   |
+                             |    \     /    |
+                             |     \   /     |
+                             |      \ /      |
+                             |_______V_______|
+
+#   #  ###  #   # #  #   # #####   ####  ###  #####  #   #   #   ### #     #
+#   # #   # #   #    #   # #      #     #   #   #    ## ##  # #   #  #     #
+ # #  #   # #   #    #   # ####   #  ## #   #   #    # # # #####  #  #     #
+  #   #   # #   #     # #  #      #   # #   #   #    #   # #   #  #  #
+  #    ###   ###       #   #####   ####  ###    #    #   # #   # ### ##### #
+"""
+
+
 def print_report(results: list) -> None:
     """Print a clean, human-readable summary block to the terminal."""
-    print()
+    print(YOUVE_GOT_MAIL_BANNER)
     print("=" * 70)
     print(f" Gmail Sweeper — {len(results)} new unread email(s) summarized")
     print("=" * 70)
@@ -507,10 +534,11 @@ def print_report(results: list) -> None:
 def main() -> None:
     config = load_config()
     processed_ids = load_cache(PROCESSED_IDS_PATH)
-    since_ts = get_since_timestamp()
-    print(f"Sweeping Primary inbox mail received after {time.ctime(since_ts)}")
+    since_map = load_since_map()
+    run_start_ts = int(time.time())
 
     all_emails = []
+    swept_labels = []
     for index, label in enumerate(config["account_labels"], start=1):
         credentials_path = Path(__file__).with_name(f"credentials{index}.json")
         creds = get_credentials_for_account(label, credentials_path)
@@ -523,12 +551,15 @@ def main() -> None:
             account_email = label
 
         unlimited = label in config["unlimited_accounts"]
+        if unlimited:
+            since_ts = None
+            print(f"Sweeping {account_email}: no date limit")
+        else:
+            since_ts = since_map.get(label, int(SWEEP_SINCE_DATE.timestamp()))
+            print(f"Sweeping {account_email}: mail received after {time.ctime(since_ts)}")
+
         try:
-            account_emails = fetch_unread(
-                service,
-                None if unlimited else since_ts,
-                filter_bulk=not unlimited,
-            )
+            account_emails = fetch_unread(service, since_ts, filter_bulk=not unlimited)
         except HttpError as exc:
             print(
                 f"Error: Gmail API request failed for account '{label}' ({account_email}): {exc}",
@@ -541,9 +572,16 @@ def main() -> None:
         all_emails.extend(account_emails)
         print(f"Fetched {len(account_emails)} unread email(s) from {account_email}")
 
+        if not unlimited:
+            swept_labels.append(label)
+
     new_emails = [e for e in all_emails if e["message_id"] not in processed_ids]
 
     if not new_emails:
+        # Nothing pending, so it's safe to move the cutoff forward now.
+        for label in swept_labels:
+            since_map[label] = run_start_ts
+        save_since_map(since_map)
         print("No new unread emails to summarize (all caught up).")
         return
 
@@ -572,6 +610,12 @@ def main() -> None:
 
     processed_ids.update(e["message_id"] for e in new_emails)
     save_cache(PROCESSED_IDS_PATH, processed_ids)
+
+    # Everything fetched this run is now either summarized or cached, so the
+    # per-account cutoff can safely move forward.
+    for label in swept_labels:
+        since_map[label] = run_start_ts
+    save_since_map(since_map)
 
     print_report(results)
     print(f"\nSaved {len(results)} summar{'y' if len(results) == 1 else 'ies'} to {OUTPUT_PATH}")
