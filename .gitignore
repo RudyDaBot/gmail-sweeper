@@ -7,3 +7,4 @@ unread_summary.json
 __pycache__/
 *.pyc
 venv/
+sweep-new-emails
