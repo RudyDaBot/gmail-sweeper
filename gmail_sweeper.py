@@ -80,8 +80,15 @@ def load_config() -> dict:
         if label.strip()
     ]
 
+    unlimited_labels = {
+        label.strip()
+        for label in os.getenv("GMAIL_UNLIMITED_ACCOUNTS", "").split(",")
+        if label.strip()
+    }
+
     return {
         "account_labels": labels,
+        "unlimited_accounts": unlimited_labels,
         "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         "ollama_model": os.getenv("OLLAMA_MODEL", "llama3.1"),
     }
@@ -248,13 +255,14 @@ def _is_bulk_mail(headers: dict, label_ids: list) -> bool:
     return False
 
 
-def fetch_unread(service, since_timestamp: int) -> list:
+def fetch_unread(service, since_timestamp: int | None, filter_bulk: bool = True) -> list:
     """
-    Fetch unread messages received after since_timestamp for an
-    authenticated Gmail API service, excluding bulk/automated mail (see
-    _is_bulk_mail) so only genuine Primary-inbox correspondence remains.
+    Fetch unread messages for an authenticated Gmail API service. If
+    since_timestamp is None, no date cutoff is applied (full unread
+    backlog). If filter_bulk is False, bulk/automated mail (see
+    _is_bulk_mail) is kept instead of excluded.
     """
-    query = f"is:unread after:{since_timestamp}"
+    query = "is:unread" if since_timestamp is None else f"is:unread after:{since_timestamp}"
     message_refs = []
     page_token = None
     while True:
@@ -280,7 +288,7 @@ def fetch_unread(service, since_timestamp: int) -> list:
         headers = {
             h["name"]: h["value"] for h in full.get("payload", {}).get("headers", [])
         }
-        if _is_bulk_mail(headers, full.get("labelIds", [])):
+        if filter_bulk and _is_bulk_mail(headers, full.get("labelIds", [])):
             continue
 
         body, is_html = _extract_body(full.get("payload", {}))
@@ -514,8 +522,13 @@ def main() -> None:
             print(f"Warning: could not fetch profile for account '{label}': {exc}", file=sys.stderr)
             account_email = label
 
+        unlimited = label in config["unlimited_accounts"]
         try:
-            account_emails = fetch_unread(service, since_ts)
+            account_emails = fetch_unread(
+                service,
+                None if unlimited else since_ts,
+                filter_bulk=not unlimited,
+            )
         except HttpError as exc:
             print(
                 f"Error: Gmail API request failed for account '{label}' ({account_email}): {exc}",
