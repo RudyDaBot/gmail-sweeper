@@ -460,11 +460,12 @@ def ensure_ollama_running(base_url: str) -> bool:
 # --------------------------------------------------------------------------
 
 def summarize_email(email_dict: dict, base_url: str, model: str) -> str:
-    """Ask the local Ollama model for a 1-2 bullet point summary."""
+    """Ask the local Ollama model to summarize the email as it sees fit."""
     prompt = (
-        "Summarize the following email in 1-2 concise bullet points, "
-        "focusing only on the key takeaways or action items. "
-        "Respond with just the bullet points, no preamble.\n\n"
+        "Summarize the following email as bullet points, focusing on the "
+        "key takeaways or action items. Use as many or as few bullet points "
+        "as the content warrants. Respond with just the bullet points, no "
+        "preamble.\n\n"
         f"From: {email_dict['from']}\n"
         f"Subject: {email_dict['subject']}\n"
         f"Body:\n{email_dict['clean_body']}\n"
