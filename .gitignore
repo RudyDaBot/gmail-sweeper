@@ -1,0 +1,9 @@
+.env
+credentials*.json
+token_*.json
+processed_ids.json
+.swept_since
+unread_summary.json
+__pycache__/
+*.pyc
+venv/

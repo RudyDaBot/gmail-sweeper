@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec "/home/timmy/Code/mailSweeper/venv/bin/python" "/home/timmy/Code/mailSweeper/gmail_sweeper.py" "$@"
