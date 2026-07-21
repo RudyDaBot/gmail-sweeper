@@ -19,4 +19,5 @@ Now when you launch this, the program will start authenticating however many ema
 
 # Bonus Features
 
-This program tells IMAP to just peek at the emails, so whne you open the Gmail app it actually wont make the emails unread again, but keeps a local cache of read emails so that it doesnt re-read all unreads. Date set to 19th July, 2026 as the point after mails are to be read.
+This program tells IMAP to just peek at the emails, so whne you open the Gmail app it actually wont make the emails unread again, but keeps a local cache of read emails so that it doesnt re-read all unreads. Date set to the last time of sweep.
+Does not apply any mail filters to a gmail account labelled "academic".
