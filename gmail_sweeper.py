@@ -13,18 +13,14 @@ and so on, each producing its own token file. The gmail.readonly scope
 means messages are never modified, so they stay unread regardless of how
 many times this script runs.
 
-Bulk/automated mail (marketing, notifications, automated receipts) is
-excluded via a heuristic (see _is_bulk_mail) rather than Gmail's
-CATEGORY_* labels, since those are inconsistently applied — some accounts
-never assign them even to obvious marketing mail. Accounts listed in
-GMAIL_NO_BULK_FILTER_ACCOUNTS skip this filter entirely. Separately, for
-accounts not listed in GMAIL_UNLIMITED_ACCOUNTS, mail is only in scope if
-received after the previous successful sweep of that account -- a rolling
-per-account cutoff persisted in .swept_since, so each run only asks Gmail
-for what's new since last time instead of re-fetching the same window
-repeatedly. The very first sweep of an account falls back to
-SWEEP_SINCE_DATE below. GMAIL_UNLIMITED_ACCOUNTS implies both no date
-limit and no bulk-mail filter for that account.
+Every unread message is fetched -- there is no bulk/marketing-mail filter.
+For accounts not listed in GMAIL_UNLIMITED_ACCOUNTS, mail is only in scope
+if received after the previous successful sweep of that account -- a
+rolling per-account cutoff persisted in .swept_since, so each run only
+asks Gmail for what's new since last time instead of re-fetching the same
+window repeatedly. The very first sweep of an account falls back to
+SWEEP_SINCE_DATE below. Accounts listed in GMAIL_UNLIMITED_ACCOUNTS skip
+the date cutoff too, fetching the full unread backlog every run.
 
 A local cache file (processed_ids.json) tracks which message IDs have
 already been summarized, so re-running the script only processes messages
@@ -85,24 +81,15 @@ def load_config() -> dict:
         if label.strip()
     ]
 
-    unlimited_labels = {
+    no_date_limit_labels = {
         label.strip()
         for label in os.getenv("GMAIL_UNLIMITED_ACCOUNTS", "").split(",")
         if label.strip()
     }
 
-    no_bulk_filter_labels = {
-        label.strip()
-        for label in os.getenv("GMAIL_NO_BULK_FILTER_ACCOUNTS", "").split(",")
-        if label.strip()
-    } | unlimited_labels
-
-    no_date_limit_labels = unlimited_labels
-
     return {
         "account_labels": labels,
         "no_date_limit_accounts": no_date_limit_labels,
-        "no_bulk_filter_accounts": no_bulk_filter_labels,
         "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         "ollama_model": os.getenv("OLLAMA_MODEL", "llama3.1"),
     }
@@ -239,48 +226,11 @@ def build_gmail_url(message_id: str) -> str:
     return "https://mail.google.com/mail/u/0/#search/id%3A" + message_id
 
 
-_NOISY_CATEGORIES = {
-    "CATEGORY_SOCIAL",
-    "CATEGORY_PROMOTIONS",
-    "CATEGORY_UPDATES",
-    "CATEGORY_FORUMS",
-}
-_BULK_SENDER_PATTERN = re.compile(
-    r"(no-?reply|do-?not-?reply|notifications?|alerts?|bounce|"
-    r"mailer-daemon|postmaster|marketing|newsletter)",
-    re.IGNORECASE,
-)
-
-
-def _is_bulk_mail(headers: dict, label_ids: list) -> bool:
-    """
-    Heuristically identify bulk/automated mail (marketing, notifications,
-    automated receipts) to exclude from the Primary-inbox sweep.
-
-    Gmail's CATEGORY_* labels are the ideal signal but are inconsistently
-    applied — some accounts (e.g. ones with inbox tabs turned off) never
-    assign them even to obvious marketing mail. List-Unsubscribe/List-Id/
-    Precedence and common automated-sender address patterns catch what
-    category labels miss, including transactional mail like payment
-    receipts that never carry an unsubscribe link.
-    """
-    if _NOISY_CATEGORIES.intersection(label_ids):
-        return True
-    if "List-Unsubscribe" in headers or "List-Id" in headers:
-        return True
-    if headers.get("Precedence", "").lower() in ("bulk", "list", "junk"):
-        return True
-    if _BULK_SENDER_PATTERN.search(headers.get("From", "")):
-        return True
-    return False
-
-
-def fetch_unread(service, since_timestamp: int | None, filter_bulk: bool = True) -> list:
+def fetch_unread(service, since_timestamp: int | None) -> list:
     """
     Fetch unread messages for an authenticated Gmail API service. If
     since_timestamp is None, no date cutoff is applied (full unread
-    backlog). If filter_bulk is False, bulk/automated mail (see
-    _is_bulk_mail) is kept instead of excluded.
+    backlog).
     """
     query = "is:unread" if since_timestamp is None else f"is:unread after:{since_timestamp}"
     message_refs = []
@@ -308,9 +258,6 @@ def fetch_unread(service, since_timestamp: int | None, filter_bulk: bool = True)
         headers = {
             h["name"]: h["value"] for h in full.get("payload", {}).get("headers", [])
         }
-        if filter_bulk and _is_bulk_mail(headers, full.get("labelIds", [])):
-            continue
-
         body, is_html = _extract_body(full.get("payload", {}))
 
         emails.append(
@@ -564,7 +511,6 @@ def main() -> None:
             account_email = label
 
         no_date_limit = label in config["no_date_limit_accounts"]
-        no_bulk_filter = label in config["no_bulk_filter_accounts"]
         if no_date_limit:
             since_ts = None
             print(f"Sweeping {account_email}: no date limit")
@@ -573,7 +519,7 @@ def main() -> None:
             print(f"Sweeping {account_email}: mail received after {time.ctime(since_ts)}")
 
         try:
-            account_emails = fetch_unread(service, since_ts, filter_bulk=not no_bulk_filter)
+            account_emails = fetch_unread(service, since_ts)
         except HttpError as exc:
             print(
                 f"Error: Gmail API request failed for account '{label}' ({account_email}): {exc}",
