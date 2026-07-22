@@ -16,12 +16,15 @@ many times this script runs.
 Bulk/automated mail (marketing, notifications, automated receipts) is
 excluded via a heuristic (see _is_bulk_mail) rather than Gmail's
 CATEGORY_* labels, since those are inconsistently applied — some accounts
-never assign them even to obvious marketing mail. For accounts not listed
-in GMAIL_UNLIMITED_ACCOUNTS, mail is only in scope if received after the
-previous successful sweep of that account -- a rolling per-account cutoff
-persisted in .swept_since, so each run only asks Gmail for what's new
-since last time instead of re-fetching the same window repeatedly. The
-very first sweep of an account falls back to SWEEP_SINCE_DATE below.
+never assign them even to obvious marketing mail. Accounts listed in
+GMAIL_NO_BULK_FILTER_ACCOUNTS skip this filter entirely. Separately, for
+accounts not listed in GMAIL_UNLIMITED_ACCOUNTS, mail is only in scope if
+received after the previous successful sweep of that account -- a rolling
+per-account cutoff persisted in .swept_since, so each run only asks Gmail
+for what's new since last time instead of re-fetching the same window
+repeatedly. The very first sweep of an account falls back to
+SWEEP_SINCE_DATE below. GMAIL_UNLIMITED_ACCOUNTS implies both no date
+limit and no bulk-mail filter for that account.
 
 A local cache file (processed_ids.json) tracks which message IDs have
 already been summarized, so re-running the script only processes messages
@@ -88,9 +91,18 @@ def load_config() -> dict:
         if label.strip()
     }
 
+    no_bulk_filter_labels = {
+        label.strip()
+        for label in os.getenv("GMAIL_NO_BULK_FILTER_ACCOUNTS", "").split(",")
+        if label.strip()
+    } | unlimited_labels
+
+    no_date_limit_labels = unlimited_labels
+
     return {
         "account_labels": labels,
-        "unlimited_accounts": unlimited_labels,
+        "no_date_limit_accounts": no_date_limit_labels,
+        "no_bulk_filter_accounts": no_bulk_filter_labels,
         "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         "ollama_model": os.getenv("OLLAMA_MODEL", "llama3.1"),
     }
@@ -551,8 +563,9 @@ def main() -> None:
             print(f"Warning: could not fetch profile for account '{label}': {exc}", file=sys.stderr)
             account_email = label
 
-        unlimited = label in config["unlimited_accounts"]
-        if unlimited:
+        no_date_limit = label in config["no_date_limit_accounts"]
+        no_bulk_filter = label in config["no_bulk_filter_accounts"]
+        if no_date_limit:
             since_ts = None
             print(f"Sweeping {account_email}: no date limit")
         else:
@@ -560,7 +573,7 @@ def main() -> None:
             print(f"Sweeping {account_email}: mail received after {time.ctime(since_ts)}")
 
         try:
-            account_emails = fetch_unread(service, since_ts, filter_bulk=not unlimited)
+            account_emails = fetch_unread(service, since_ts, filter_bulk=not no_bulk_filter)
         except HttpError as exc:
             print(
                 f"Error: Gmail API request failed for account '{label}' ({account_email}): {exc}",
@@ -573,7 +586,7 @@ def main() -> None:
         all_emails.extend(account_emails)
         print(f"Fetched {len(account_emails)} unread email(s) from {account_email}")
 
-        if not unlimited:
+        if not no_date_limit:
             swept_labels.append(label)
 
     new_emails = [e for e in all_emails if e["message_id"] not in processed_ids]
