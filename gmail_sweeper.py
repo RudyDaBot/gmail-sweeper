@@ -87,9 +87,16 @@ def load_config() -> dict:
         if label.strip()
     }
 
+    primary_only_labels = {
+        label.strip()
+        for label in os.getenv("GMAIL_PRIMARY_ONLY_ACCOUNTS", "").split(",")
+        if label.strip()
+    }
+
     return {
         "account_labels": labels,
         "no_date_limit_accounts": no_date_limit_labels,
+        "primary_only_accounts": primary_only_labels,
         "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         "ollama_model": os.getenv("OLLAMA_MODEL", "llama3.1"),
     }
@@ -226,13 +233,18 @@ def build_gmail_url(message_id: str) -> str:
     return "https://mail.google.com/mail/u/0/#search/id%3A" + message_id
 
 
-def fetch_unread(service, since_timestamp: int | None) -> list:
+def fetch_unread(service, since_timestamp: int | None, primary_only: bool = False) -> list:
     """
     Fetch unread messages for an authenticated Gmail API service. If
     since_timestamp is None, no date cutoff is applied (full unread
-    backlog).
+    backlog). If primary_only is True, restricts to Gmail's Primary
+    inbox category tab.
     """
-    query = "is:unread" if since_timestamp is None else f"is:unread after:{since_timestamp}"
+    query = "is:unread"
+    if since_timestamp is not None:
+        query += f" after:{since_timestamp}"
+    if primary_only:
+        query += " category:primary"
     message_refs = []
     page_token = None
     while True:
@@ -511,6 +523,7 @@ def main() -> None:
             account_email = label
 
         no_date_limit = label in config["no_date_limit_accounts"]
+        primary_only = label in config["primary_only_accounts"]
         if no_date_limit:
             since_ts = None
             print(f"Sweeping {account_email}: no date limit")
@@ -519,7 +532,7 @@ def main() -> None:
             print(f"Sweeping {account_email}: mail received after {time.ctime(since_ts)}")
 
         try:
-            account_emails = fetch_unread(service, since_ts)
+            account_emails = fetch_unread(service, since_ts, primary_only=primary_only)
         except HttpError as exc:
             print(
                 f"Error: Gmail API request failed for account '{label}' ({account_email}): {exc}",
